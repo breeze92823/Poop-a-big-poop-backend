@@ -59,6 +59,11 @@ export const POOP_SIZE_MAX = 2.5;
 // modified client can't flood every other client with poop drops.
 export const POOP_MIN_INTERVAL_MS = 300;
 
+// Treasure Chest (client systems/chest.js): only this many players, ever, can open it, each
+// once. Claims are keyed by account id (guests by session id) and persisted as
+// PlayerDoc.chestOpened. Keep in step with the client's CHEST_MAX_OPENS.
+export const CHEST_MAX_OPENS = 2;
+
 // Stealing poop from another player (LobbyRoom.ts `steal` / `stealHandover`). The cost is
 // burned, not paid to the victim; keep STEAL_COST in step with the client's data/net.js.
 export const STEAL_COST = 1000;

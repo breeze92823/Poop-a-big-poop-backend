@@ -54,6 +54,9 @@ export interface PlayerDoc {
   // Bought Theft Immunity at the Locked Jar: nobody can steal this player's poop and they can't
   // steal either. Only ever set, never cleared (client systems/theftImmunity.js).
   theftImmune?: boolean;
+  // This account opened the Treasure Chest (constants.ts CHEST_MAX_OPENS players in total can).
+  // Set only by the server's `openChest` handler, never accepted from a client save.
+  chestOpened?: boolean;
   // Total seconds this account has spent connected, measured by the SERVER
   // clock (LobbyRoom.ts flushPlaytime) -- never client-reported, so it can't
   // be forged via saveProgress. Older docs may lack it.
