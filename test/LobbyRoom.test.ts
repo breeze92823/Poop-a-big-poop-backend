@@ -11,6 +11,7 @@ import {
   sanitizeBoost,
   sanitizeSavedFoods,
   resolveTutorialStep,
+  clientNeedsReload,
   type LobbyRoom,
 } from "../src/rooms/LobbyRoom.js";
 import { __setPlayersForTest, type PlayerDoc } from "../src/db.js";
@@ -490,6 +491,17 @@ describe("LobbyRoom", () => {
       await sleep(80);
       assert.strictEqual(fake.docs.get("u1")!.savedFoods, undefined);
       assert.strictEqual(fake.docs.get("u1")!.money, 5);
+    });
+  });
+
+  describe("clientNeedsReload", () => {
+    it("flags clients below the minimum version, and ones that send none", () => {
+      assert.strictEqual(clientNeedsReload(undefined, 2), true);
+      assert.strictEqual(clientNeedsReload("3", 2), true);
+      assert.strictEqual(clientNeedsReload(1, 2), true);
+      assert.strictEqual(clientNeedsReload(2, 2), false);
+      assert.strictEqual(clientNeedsReload(5, 2), false);
+      assert.strictEqual(clientNeedsReload(undefined, 0), false);
     });
   });
 

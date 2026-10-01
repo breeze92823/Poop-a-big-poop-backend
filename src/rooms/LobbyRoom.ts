@@ -27,6 +27,8 @@ import {
   STEAL_REVENGE_BLOCK_MS,
   CHEST_MAX_OPENS,
   CHEST_RESET_EPOCH,
+  CHEST_ENABLED,
+  MIN_CLIENT_VERSION,
 } from "../constants.js";
 import {
   getPlayers,
@@ -169,6 +171,11 @@ export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
     if (step >= TUTORIAL_DONE_STEP) out.tutorialDone = true;
   }
   return out;
+}
+
+// True for a client whose reported build version is below MIN_CLIENT_VERSION (none = 0). Exported for tests.
+export function clientNeedsReload(version: unknown, min = MIN_CLIENT_VERSION): boolean {
+  return (finite(version) ? version : 0) < min;
 }
 
 // What loadProgress() sends down as tutorialStep. A doc saved before steps were tracked has
@@ -398,6 +405,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     // the same message. Only the first CHEST_MAX_OPENS distinct players win, once each; the prize
     // itself is granted by the client on `chestResult` ok.
     openChest: async (client: Client) => {
+      if (!CHEST_ENABLED) return client.send("chestResult", { ok: false, reason: "disabled", first: false, ...this.chestInfo(client.sessionId) });
       await this.chestReady;
       const identity = this.stealIdentity(client.sessionId);
       const reply = (ok: boolean, reason?: string, first = false) =>
@@ -529,7 +537,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.tutorialSteps.delete(sessionId);
   }
 
-  onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
+  onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string; version?: number }) {
     // No spawn assignment -- the client reports its real position in its
     // first "move" message.
     const p = new PlayerState();
@@ -540,6 +548,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
     this.setUserId(client, p, options?.userId ?? "");
     client.send("shop", this.shelf.payload());
+    // A stale tab is told to refresh (it saves first, then reloads).
+    if (clientNeedsReload(options?.version)) client.send("reload", { min: MIN_CLIENT_VERSION });
     this.sendChest(client);
     void this.refreshLeaderboard();
   }

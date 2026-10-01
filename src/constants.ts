@@ -59,6 +59,17 @@ export const POOP_SIZE_MAX = 2.5;
 // modified client can't flood every other client with poop drops.
 export const POOP_MIN_INTERVAL_MS = 300;
 
+// Forced client update. The client sends its CLIENT_VERSION (its data/net.js) when joining; one
+// below this gets a `reload` message and refreshes the page (components/UpdateNotice.jsx). Raise
+// this together with CLIENT_VERSION whenever a deploy must not be run by stale tabs. Clients from
+// before the handshake send no version (counted as 0) and can't act on it, so they only pick it
+// up on their next manual reload.
+export const MIN_CLIENT_VERSION = 1;
+
+// Treasure Chest on/off. While false the chest is hidden in the client (CHEST_ENABLED in its
+// data/world.js) and `openChest` is refused, so stale tabs that still show it can't claim.
+export const CHEST_ENABLED = false;
+
 // Treasure Chest (client systems/chest.js): only this many players, ever, can open it, each
 // once. Claims are keyed by account id (guests by session id) and persisted as
 // PlayerDoc.chestOpened. Keep in step with the client's CHEST_MAX_OPENS.
