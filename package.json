@@ -13,6 +13,7 @@
     "loadtest": "tsx loadtest/example.ts --room lobby --numClients 2",
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "clean": "rimraf build",
+    "reset-chest": "tsx scripts/reset-chest.ts",
     "test": "mocha -r tsx test/**.test.ts --exit --timeout 15000"
   },
   "author": "",

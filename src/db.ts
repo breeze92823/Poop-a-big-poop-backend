@@ -54,6 +54,9 @@ export interface PlayerDoc {
   // Bought Theft Immunity at the Locked Jar: nobody can steal this player's poop and they can't
   // steal either. Only ever set, never cleared (client systems/theftImmunity.js).
   theftImmune?: boolean;
+  // This account opened the Treasure Chest (constants.ts CHEST_MAX_OPENS players in total can).
+  // Set only by the server's `openChest` handler, never accepted from a client save.
+  chestOpened?: boolean;
   // Total seconds this account has spent connected, measured by the SERVER
   // clock (LobbyRoom.ts flushPlaytime) -- never client-reported, so it can't
   // be forged via saveProgress. Older docs may lack it.
@@ -63,7 +66,14 @@ export interface PlayerDoc {
 }
 
 let client: MongoClient | null = null;
+// Small key/value docs for the server's own bookkeeping (e.g. the chest reset epoch).
+export interface MetaDoc {
+  _id: string;
+  resetEpoch?: number;
+}
+
 let players: Collection<PlayerDoc> | null = null;
+let meta: Collection<MetaDoc> | null = null;
 
 export async function connectDb(): Promise<void> {
   const uri = process.env.MONGODB_URI;
@@ -77,6 +87,7 @@ export async function connectDb(): Promise<void> {
     // No dbName passed to .db() -- the injected URI already points at this
     // game+channel's own isolated database.
     players = client.db().collection<PlayerDoc>("players");
+    meta = client.db().collection<MetaDoc>("meta");
     console.log("[db] connected to MongoDB");
 
     // refreshLeaderboard() sorts by each of these; createIndex is idempotent.
@@ -93,6 +104,7 @@ export async function connectDb(): Promise<void> {
     console.warn("[db] connect failed -- player progress will not persist:", err);
     client = null;
     players = null;
+    meta = null;
   }
 }
 
@@ -100,6 +112,10 @@ export async function connectDb(): Promise<void> {
 // "skip persistence for this request", never throw.
 export function getPlayers(): Collection<PlayerDoc> | null {
   return players;
+}
+
+export function getMeta(): Collection<MetaDoc> | null {
+  return meta;
 }
 
 // Test-only seam: lets tests exercise the leaderboard/save logic against an

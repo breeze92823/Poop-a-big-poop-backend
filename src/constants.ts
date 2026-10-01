@@ -59,6 +59,25 @@ export const POOP_SIZE_MAX = 2.5;
 // modified client can't flood every other client with poop drops.
 export const POOP_MIN_INTERVAL_MS = 300;
 
+// Forced client update. The client sends its CLIENT_VERSION (its data/net.js) when joining; one
+// below this gets a `reload` message and refreshes the page (components/UpdateNotice.jsx). Raise
+// this together with CLIENT_VERSION whenever a deploy must not be run by stale tabs. Clients from
+// before the handshake send no version (counted as 0) and can't act on it, so they only pick it
+// up on their next manual reload.
+export const MIN_CLIENT_VERSION = 3;
+
+// Treasure Chest on/off. While false the chest is hidden in the client (CHEST_ENABLED in its
+// data/world.js) and `openChest` is refused, so stale tabs that still show it can't claim.
+export const CHEST_ENABLED = false;
+
+// Treasure Chest (client systems/chest.js): only this many players, ever, can open it, each
+// once. Claims are keyed by account id (guests by session id) and persisted as
+// PlayerDoc.chestOpened. Keep in step with the client's CHEST_MAX_OPENS.
+export const CHEST_MAX_OPENS = 5;
+// Bump this number and deploy to re-arm the chest: on startup the room clears every account's
+// chestOpened once per value (remembered in the `meta` collection), so all slots are free again.
+export const CHEST_RESET_EPOCH = 1;
+
 // Stealing poop from another player (LobbyRoom.ts `steal` / `stealHandover`). The cost is
 // burned, not paid to the victim; keep STEAL_COST in step with the client's data/net.js.
 export const STEAL_COST = 1000;

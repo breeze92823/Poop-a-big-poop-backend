@@ -25,9 +25,14 @@ import {
   STEAL_COOLDOWN_MS,
   STEAL_PROTECT_MS,
   STEAL_REVENGE_BLOCK_MS,
+  CHEST_MAX_OPENS,
+  CHEST_RESET_EPOCH,
+  CHEST_ENABLED,
+  MIN_CLIENT_VERSION,
 } from "../constants.js";
 import {
   getPlayers,
+  getMeta,
   type PlayerDoc,
   type PoopStackDoc,
   type FoodSlotDoc,
@@ -168,6 +173,11 @@ export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   return out;
 }
 
+// True for a client whose reported build version is below MIN_CLIENT_VERSION (none = 0). Exported for tests.
+export function clientNeedsReload(version: unknown, min = MIN_CLIENT_VERSION): boolean {
+  return (finite(version) ? version : 0) < min;
+}
+
 // What loadProgress() sends down as tutorialStep. A doc saved before steps were tracked has
 // only the done flag, and one with earnings predates the tutorial altogether, so it counts
 // as finished. Exported for tests.
@@ -219,6 +229,50 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   private stealBlockedUntil = new Map<string, number>();
   private stealIdentity(sessionId: string) {
     return this.userIds.get(sessionId) ?? sessionId;
+  }
+
+  // Treasure Chest: identities (account id, else session id) that already opened it. At most
+  // CHEST_MAX_OPENS exist; signed-in claims are reloaded from Mongo (PlayerDoc.chestOpened) on
+  // room creation, guest claims live only as long as the room.
+  private chestClaims = new Set<string>();
+  // The chest stays open for everyone once the first player opens it, until the room restarts.
+  private chestOpen = false;
+  private chestReady: Promise<void> = Promise.resolve();
+  private chestInfo(sessionId: string) {
+    return {
+      left: Math.max(0, CHEST_MAX_OPENS - this.chestClaims.size),
+      mine: this.chestClaims.has(this.stealIdentity(sessionId)),
+      open: this.chestOpen,
+    };
+  }
+  private sendChest(client: Client) {
+    void this.chestReady.then(() => {
+      try {
+        client.send("chest", this.chestInfo(client.sessionId));
+      } catch {
+        // Already gone.
+      }
+    });
+  }
+  private async loadChestClaims() {
+    const players = getPlayers();
+    if (!players) return;
+    try {
+      // A deploy with a higher CHEST_RESET_EPOCH re-arms the chest once: every saved claim is cleared.
+      const meta = getMeta();
+      if (meta) {
+        const mark = await meta.findOne({ _id: "chest" });
+        if ((mark?.resetEpoch ?? 0) < CHEST_RESET_EPOCH) {
+          const res = await players.updateMany({ chestOpened: true }, { $unset: { chestOpened: "" } });
+          await meta.updateOne({ _id: "chest" }, { $set: { resetEpoch: CHEST_RESET_EPOCH } }, { upsert: true });
+          console.log(`[LobbyRoom] chest re-armed (epoch ${CHEST_RESET_EPOCH}): cleared ${res.modifiedCount} claim(s)`);
+        }
+      }
+      const docs = await players.find({ chestOpened: true }, { projection: { _id: 1 } }).limit(CHEST_MAX_OPENS).toArray();
+      for (const doc of docs) this.chestClaims.add(doc._id);
+    } catch (err) {
+      console.warn("[LobbyRoom] chest claims load failed", err);
+    }
   }
 
   messages = {
@@ -346,6 +400,45 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       client.send("buyResult", { id, ok });
       this.broadcast("shop", this.shelf.payload());
     },
+    // The sender wants the Treasure Chest. The first claimant opens it for everyone (`chestAnim`
+    // plays the opening on every client and it then stays open); each later player redeems with
+    // the same message. Only the first CHEST_MAX_OPENS distinct players win, once each; the prize
+    // itself is granted by the client on `chestResult` ok.
+    openChest: async (client: Client) => {
+      if (!CHEST_ENABLED) return client.send("chestResult", { ok: false, reason: "disabled", first: false, ...this.chestInfo(client.sessionId) });
+      await this.chestReady;
+      const identity = this.stealIdentity(client.sessionId);
+      const reply = (ok: boolean, reason?: string, first = false) =>
+        client.send("chestResult", { ok, reason, first, ...this.chestInfo(client.sessionId) });
+      if (this.chestClaims.has(identity)) return reply(false, "mine");
+      if (this.chestClaims.size >= CHEST_MAX_OPENS) return reply(false, "empty");
+      // Claim synchronously so two simultaneous requests can't both take the last slot.
+      this.chestClaims.add(identity);
+      const first = !this.chestOpen;
+      this.chestOpen = true;
+      const userId = this.userIds.get(client.sessionId);
+      const players = getPlayers();
+      if (userId && players) {
+        try {
+          await players.updateOne(
+            { _id: userId },
+            { $set: { chestOpened: true, updatedAt: new Date() }, $setOnInsert: { version: 1 } },
+            { upsert: true },
+          );
+        } catch (err) {
+          console.warn("[LobbyRoom] chest claim save failed", err);
+          this.chestClaims.delete(identity);
+          if (first && this.chestClaims.size === 0) this.chestOpen = false;
+          return reply(false, "error");
+        }
+      }
+      // Opening animation for every player first, then the new state and our own prize.
+      if (first) this.broadcast("chestAnim", { by: this.state.players.get(client.sessionId)?.username || "Someone" });
+      for (const c of this.clients) this.sendChest(c);
+      // Every claim (the opener's and each redeemer's) shows the treasure flying to this player.
+      this.broadcast("chestClaim", { id: client.sessionId });
+      reply(true, undefined, first);
+    },
     // Re-states identity after a login/logout that happens AFTER join (a guest
     // who signs in mid-session). Without this a late sign-in would never get
     // a userId and saveProgress would no-op for the whole session.
@@ -360,6 +453,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   // Runs once immediately -- a fresh room shouldn't sit on an empty board for
   // a full LEADERBOARD_REFRESH_MS -- then on a timer.
   onCreate() {
+    this.chestReady = this.loadChestClaims();
     void this.refreshLeaderboard();
     this.clock.setInterval(() => {
       void this.refreshLeaderboard();
@@ -443,7 +537,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.tutorialSteps.delete(sessionId);
   }
 
-  onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
+  onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string; version?: number }) {
     // No spawn assignment -- the client reports its real position in its
     // first "move" message.
     const p = new PlayerState();
@@ -454,6 +548,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
     this.setUserId(client, p, options?.userId ?? "");
     client.send("shop", this.shelf.payload());
+    // A stale tab is told to refresh (it saves first, then reloads).
+    if (clientNeedsReload(options?.version)) client.send("reload", { min: MIN_CLIENT_VERSION });
+    this.sendChest(client);
     void this.refreshLeaderboard();
   }
 
@@ -489,6 +586,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       this.userIds.delete(client.sessionId);
     }
 
+    this.sendChest(client);
     void this.refreshLeaderboard();
   }
 
