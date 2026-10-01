@@ -26,9 +26,11 @@ import {
   STEAL_PROTECT_MS,
   STEAL_REVENGE_BLOCK_MS,
   CHEST_MAX_OPENS,
+  CHEST_RESET_EPOCH,
 } from "../constants.js";
 import {
   getPlayers,
+  getMeta,
   type PlayerDoc,
   type PoopStackDoc,
   type FoodSlotDoc,
@@ -249,6 +251,16 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     const players = getPlayers();
     if (!players) return;
     try {
+      // A deploy with a higher CHEST_RESET_EPOCH re-arms the chest once: every saved claim is cleared.
+      const meta = getMeta();
+      if (meta) {
+        const mark = await meta.findOne({ _id: "chest" });
+        if ((mark?.resetEpoch ?? 0) < CHEST_RESET_EPOCH) {
+          const res = await players.updateMany({ chestOpened: true }, { $unset: { chestOpened: "" } });
+          await meta.updateOne({ _id: "chest" }, { $set: { resetEpoch: CHEST_RESET_EPOCH } }, { upsert: true });
+          console.log(`[LobbyRoom] chest re-armed (epoch ${CHEST_RESET_EPOCH}): cleared ${res.modifiedCount} claim(s)`);
+        }
+      }
       const docs = await players.find({ chestOpened: true }, { projection: { _id: 1 } }).limit(CHEST_MAX_OPENS).toArray();
       for (const doc of docs) this.chestClaims.add(doc._id);
     } catch (err) {

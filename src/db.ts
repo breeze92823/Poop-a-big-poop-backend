@@ -66,7 +66,14 @@ export interface PlayerDoc {
 }
 
 let client: MongoClient | null = null;
+// Small key/value docs for the server's own bookkeeping (e.g. the chest reset epoch).
+export interface MetaDoc {
+  _id: string;
+  resetEpoch?: number;
+}
+
 let players: Collection<PlayerDoc> | null = null;
+let meta: Collection<MetaDoc> | null = null;
 
 export async function connectDb(): Promise<void> {
   const uri = process.env.MONGODB_URI;
@@ -80,6 +87,7 @@ export async function connectDb(): Promise<void> {
     // No dbName passed to .db() -- the injected URI already points at this
     // game+channel's own isolated database.
     players = client.db().collection<PlayerDoc>("players");
+    meta = client.db().collection<MetaDoc>("meta");
     console.log("[db] connected to MongoDB");
 
     // refreshLeaderboard() sorts by each of these; createIndex is idempotent.
@@ -96,6 +104,7 @@ export async function connectDb(): Promise<void> {
     console.warn("[db] connect failed -- player progress will not persist:", err);
     client = null;
     players = null;
+    meta = null;
   }
 }
 
@@ -103,6 +112,10 @@ export async function connectDb(): Promise<void> {
 // "skip persistence for this request", never throw.
 export function getPlayers(): Collection<PlayerDoc> | null {
   return players;
+}
+
+export function getMeta(): Collection<MetaDoc> | null {
+  return meta;
 }
 
 // Test-only seam: lets tests exercise the leaderboard/save logic against an

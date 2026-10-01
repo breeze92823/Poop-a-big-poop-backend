@@ -62,7 +62,10 @@ export const POOP_MIN_INTERVAL_MS = 300;
 // Treasure Chest (client systems/chest.js): only this many players, ever, can open it, each
 // once. Claims are keyed by account id (guests by session id) and persisted as
 // PlayerDoc.chestOpened. Keep in step with the client's CHEST_MAX_OPENS.
-export const CHEST_MAX_OPENS = 2;
+export const CHEST_MAX_OPENS = 5;
+// Bump this number and deploy to re-arm the chest: on startup the room clears every account's
+// chestOpened once per value (remembered in the `meta` collection), so all slots are free again.
+export const CHEST_RESET_EPOCH = 1;
 
 // Stealing poop from another player (LobbyRoom.ts `steal` / `stealHandover`). The cost is
 // burned, not paid to the victim; keep STEAL_COST in step with the client's data/net.js.
