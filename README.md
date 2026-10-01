@@ -106,7 +106,7 @@ GitHub settings (Settings → Secrets and variables → Actions):
 
 | Name | Type | Value |
 |---|---|---|
-| `BLOXITY_GAME_ID` | **Variable** | Lowercase game ID from the Bloxity "My Games" dashboard (should be `poop-a-big-poop`) |
+| `LEGION_GAME_ID` | **Variable** | Lowercase game ID from the Bloxity "My Games" dashboard (should be `poop-a-big-poop`) |
 | `LEGION_DEPLOY_TOKEN` | **Secret** | Deploy token from the Bloxity dashboard |
 | `GITHUB_TOKEN` | Automatic | Provided by GitHub; used to push to GHCR. Nothing to configure |
 

@@ -12,7 +12,7 @@ env:
   # Repo variable, set under Settings -> Secrets and variables -> Actions -> Variables.
   # Must match the lowercase game ID created on the Bloxity "My Games" dashboard
   # (the client's GAME_SLUG in src/data/bloxity.js: poop-a-big-poop).
-  GAME_ID: ${{ vars.BLOXITY_GAME_ID }}
+  GAME_ID: ${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}
 
 jobs:
   test:
@@ -52,7 +52,7 @@ jobs:
       - name: Validate required config
         run: |
           if [ -z "${GAME_ID}" ]; then
-            echo "::error::Repo variable BLOXITY_GAME_ID is not set (Settings > Secrets and variables > Actions > Variables)."
+            echo "::error::LEGION_GAME_ID is not set (Settings > Secrets and variables > Actions > Variables)."
             exit 1
           fi
           if [ -z "${LEGION_DEPLOY_TOKEN}" ]; then
