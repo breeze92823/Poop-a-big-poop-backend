@@ -10,6 +10,7 @@ import {
   sanitizeFoods,
   sanitizeBoost,
   sanitizeSavedFoods,
+  resolveTutorialStep,
   type LobbyRoom,
 } from "../src/rooms/LobbyRoom.js";
 import { __setPlayersForTest, type PlayerDoc } from "../src/db.js";
@@ -29,6 +30,7 @@ function fakePlayersCollection(seed: PlayerDoc[] = []) {
       if (!existing && !options?.upsert) return;
       const base = existing ?? ({ _id: filter._id, ...(update.$setOnInsert ?? {}) } as PlayerDoc);
       const next = { ...base, ...(update.$set ?? {}) } as any;
+      for (const [k, v] of Object.entries(update.$max ?? {})) next[k] = Math.max((next[k] as number) ?? 0, v as number);
       for (const k of Object.keys(update.$unset ?? {})) delete next[k];
       docs.set(filter._id, next as PlayerDoc);
     },
@@ -217,6 +219,7 @@ describe("LobbyRoom", () => {
       ],
       boost,
       savedFoods: { slots: [{ id: "donut", count: 1 }], expiresAt },
+      tutorialDone: true,
     });
     await sleep(100);
 
@@ -231,6 +234,7 @@ describe("LobbyRoom", () => {
     ]);
     assert.deepStrictEqual(saved.pantry, [{ id: "lettuce", count: 3 }]);
     assert.deepStrictEqual(saved.boost, boost);
+    assert.strictEqual(saved.tutorialDone, true);
 
     const sent = captureSends(room);
     const client2 = await colyseus.connectTo(room, { userId: "u1" });
@@ -241,6 +245,7 @@ describe("LobbyRoom", () => {
     assert.strictEqual(progress.totalEarned, 5000);
     assert.deepStrictEqual(progress.pantry, [{ id: "lettuce", count: 3 }]);
     assert.deepStrictEqual(progress.boost, boost);
+    assert.strictEqual(progress.tutorialDone, true);
     assert.deepStrictEqual(progress.savedFoods, { slots: [{ id: "donut", count: 1 }], expiresAt });
     assert.strictEqual(client2.state.players.get(client2.sessionId).money, 1234.5);
   });
@@ -336,6 +341,30 @@ describe("LobbyRoom", () => {
       assert.deepStrictEqual(out.pantry, []);
       assert.strictEqual(out.boost, undefined);
       assert.strictEqual(sanitizeProgress({ money: NaN })!.money, undefined);
+    });
+
+    it("only ever accepts tutorialDone: true", () => {
+      assert.strictEqual(sanitizeProgress({ tutorialDone: true })!.tutorialDone, true);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: false })!.tutorialDone, undefined);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: "yes" })!.tutorialDone, undefined);
+    });
+
+    it("clamps tutorialStep, and a finished one also sets the done flag", () => {
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 3 })!.tutorialStep, 3);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 99 })!.tutorialStep, 6);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: -4 })!.tutorialStep, 0);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 3 })!.tutorialDone, undefined);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 6 })!.tutorialDone, true);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: true })!.tutorialStep, 6);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: "x" })!.tutorialStep, undefined);
+    });
+
+    it("resolveTutorialStep falls back to the done flag for older docs", () => {
+      assert.strictEqual(resolveTutorialStep({ tutorialStep: 2 } as PlayerDoc), 2);
+      assert.strictEqual(resolveTutorialStep({ tutorialDone: true } as PlayerDoc), 6);
+      assert.strictEqual(resolveTutorialStep({ totalEarned: 10 } as PlayerDoc), 6);
+      assert.strictEqual(resolveTutorialStep({ tutorialStep: 2, totalEarned: 10 } as PlayerDoc), 2);
+      assert.strictEqual(resolveTutorialStep({} as PlayerDoc), 0);
     });
   });
 

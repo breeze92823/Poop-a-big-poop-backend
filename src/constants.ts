@@ -35,6 +35,12 @@ export const POOP_TYPES: readonly string[] = ["plain", ...FOOD_IDS];
 export const FOOD_MAX_KINDS = FOOD_IDS.length;
 export const FOOD_MAX_COUNT = 1_000_000;
 
+// First-run tutorial progress: the client's data/tutorial.js TUTORIAL_STEPS (steps 0..5,
+// 6 = finished). Keep in step by comment.
+export const TUTORIAL_DONE_STEP = 6;
+// The step whose Buy A Food needs the guaranteed unit (client TUTORIAL_STEPS index of `buy`).
+export const TUTORIAL_BUY_STEP = 3;
+
 // Daily Size Boost (client systems/boost.js): streak is days claimed in a row.
 export const BOOST_STREAK_MAX = 100_000;
 // Epoch-ms fields (nextClaimAt, streakEnd, boostEndsAt, saved-food expiry)

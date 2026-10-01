@@ -13,6 +13,7 @@ import {
   FOOD_MAX_KINDS,
   FOOD_MAX_COUNT,
   BOOST_STREAK_MAX,
+  TUTORIAL_DONE_STEP,
   TIME_MAX,
   SAVED_FOODS_TTL_MS,
   POOP_SIZE_MIN,
@@ -27,7 +28,7 @@ import {
   type BoostDoc,
   type SavedFoodsDoc,
 } from "../db.js";
-import { ShopShelf } from "../shop.js";
+import { ShopShelf, canGrantTutorialFood } from "../shop.js";
 
 // One separate board per stat. The Cliff Board shows money; the others are
 // served too so more boards can be added without a server change.
@@ -146,7 +147,26 @@ export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (boost) out.boost = boost;
   const savedFoods = sanitizeSavedFoods(raw.savedFoods);
   if (savedFoods) out.savedFoods = savedFoods;
+  // One-way flag: a stale or forged `false` can never un-finish the tutorial.
+  if (raw.tutorialDone === true) {
+    out.tutorialDone = true;
+    out.tutorialStep = TUTORIAL_DONE_STEP;
+  }
+  if (finite(raw.tutorialStep)) {
+    const step = clampInt(raw.tutorialStep, TUTORIAL_DONE_STEP);
+    out.tutorialStep = Math.max(step, out.tutorialStep ?? 0);
+    if (step >= TUTORIAL_DONE_STEP) out.tutorialDone = true;
+  }
   return out;
+}
+
+// What loadProgress() sends down as tutorialStep. A doc saved before steps were tracked has
+// only the done flag, and one with earnings predates the tutorial altogether, so it counts
+// as finished. Exported for tests.
+export function resolveTutorialStep(doc: PlayerDoc): number {
+  if (doc.tutorialDone === true) return TUTORIAL_DONE_STEP;
+  if (typeof doc.tutorialStep === "number") return clampInt(doc.tutorialStep, TUTORIAL_DONE_STEP);
+  return (doc.totalEarned ?? 0) > 0 ? TUTORIAL_DONE_STEP : 0;
 }
 
 /**
@@ -172,6 +192,13 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   // The Buy Food shelf, shared by everyone in the room (see ../shop.ts).
   private shelf = new ShopShelf();
+
+  // Sessions that already got their free tutorial unit when the shelf was empty.
+  private tutorialGrants = new Set<string>();
+
+  // sessionId -> last known tutorial step of the signed-in account (from its save). A guest has
+  // none and counts as step 0.
+  private tutorialSteps = new Map<string, number>();
 
   messages = {
     // Throttled client-side -- not sent every physics frame.
@@ -223,6 +250,10 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (!players) return; // Mongo unset/unreachable -- degrade silently
       const patch = sanitizeProgress(msg);
       if (!patch) return;
+      const { tutorialStep, ...setPatch } = patch;
+      if (tutorialStep !== undefined) {
+        this.tutorialSteps.set(client.sessionId, Math.max(tutorialStep, this.tutorialSteps.get(client.sessionId) ?? 0));
+      }
       // Display name comes from this connection's own PlayerState, not `msg`.
       const p = this.state.players.get(client.sessionId);
       // A save that is empty or expired is removed from the document.
@@ -231,7 +262,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         await players.updateOne(
           { _id: userId },
           {
-            $set: { ...patch, username: p?.username || "Player", updatedAt: new Date() },
+            $set: { ...setPatch, username: p?.username || "Player", updatedAt: new Date() },
+            // Only ever raised, so a stale save can't send a player back a step.
+            ...(tutorialStep !== undefined ? { $max: { tutorialStep } } : {}),
             $setOnInsert: { version: 1 },
             ...(clearFoods ? { $unset: { savedFoods: "" as const } } : {}),
           },
@@ -243,9 +276,19 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     },
     // Buy one unit from the shared shelf. Money is the client's to spend; the
     // server only decides who got the last unit, then tells everyone the new stock.
-    buyFood: (client: Client, msg: { id?: string }) => {
+    buyFood: (client: Client, msg: { id?: string; tutorial?: boolean }) => {
       const id = typeof msg?.id === "string" ? msg.id : "";
-      const ok = this.shelf.buy(id);
+      let ok = this.shelf.buy(id);
+      // The tutorial's buy step must never dead-end on a sold-out shelf: one unit of the
+      // tutorial food per session is granted without touching the shared stock.
+      if (
+        !ok &&
+        msg?.tutorial === true &&
+        canGrantTutorialFood(id, this.tutorialSteps.get(client.sessionId) ?? 0, this.tutorialGrants.has(client.sessionId))
+      ) {
+        this.tutorialGrants.add(client.sessionId);
+        ok = true;
+      }
       client.send("buyResult", { id, ok });
       this.broadcast("shop", this.shelf.payload());
     },
@@ -312,6 +355,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.state.players.delete(sessionId);
     this.userIds.delete(sessionId);
     this.lastPoopAt.delete(sessionId);
+    this.tutorialGrants.delete(sessionId);
+    this.tutorialSteps.delete(sessionId);
   }
 
   onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
@@ -391,6 +436,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       // Saved total (already includes anything flushed while signed in this
       // session) -- guest time before signing in isn't counted.
       p.playTime = doc.playTime ?? 0;
+      this.tutorialSteps.set(client.sessionId, resolveTutorialStep(doc));
       client.send("progress", {
         money: p.money,
         totalEarned: p.totalEarned,
@@ -401,6 +447,8 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         // Absent for an account that never claimed a boost / saved foods.
         boost: sanitizeBoost(doc.boost) ?? null,
         savedFoods: savedFoods ?? null,
+        tutorialDone: doc.tutorialDone === true,
+        tutorialStep: resolveTutorialStep(doc),
       });
     } catch (err) {
       console.warn("[LobbyRoom] loadProgress failed", err);

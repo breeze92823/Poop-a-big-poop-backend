@@ -7,6 +7,8 @@
 // pure function of the clock, so a server restart never reshuffles it. Each food
 // shows up on a fixed number of restocks per hour set by its rarity; WHICH
 // restocks is a seeded shuffle per (hour, food).
+import { TUTORIAL_BUY_STEP } from "./constants.js";
+
 export const RESTOCK_MS = 4 * 60_000;
 export const HOUR_MS = 60 * 60_000;
 export const RESTOCKS_PER_HOUR = HOUR_MS / RESTOCK_MS; // 15
@@ -34,6 +36,16 @@ export const FOOD_RARITY: Record<string, Rarity> = {
   energy: "Legendary",
   pizza: "Prismatic",
 };
+
+// The one food the tutorial's buy step guarantees (client data/tutorial.js FIRST_FOOD).
+export const TUTORIAL_FOOD = "lettuce";
+
+// Whether a session may get the free tutorial unit: only the tutorial food, only once, and only
+// while its last known tutorial step is at or before the buy step (a saved step lags the real one,
+// so it can only prove a player is past it, never that they are on it).
+export function canGrantTutorialFood(id: string, step: number, alreadyGranted: boolean): boolean {
+  return id === TUTORIAL_FOOD && !alreadyGranted && step <= TUTORIAL_BUY_STEP;
+}
 
 export const cycleOf = (now: number) => Math.floor(now / RESTOCK_MS);
 export const cycleEndsAt = (cycle: number) => (cycle + 1) * RESTOCK_MS;
@@ -99,6 +111,6 @@ export class ShopShelf {
   }
 
   payload(now = Date.now()) {
-    return { stock: { ...this.stock }, endsInMs: Math.max(0, cycleEndsAt(this.cycle) - now) };
+    return { cycle: this.cycle, stock: { ...this.stock }, endsInMs: Math.max(0, cycleEndsAt(this.cycle) - now) };
   }
 }
