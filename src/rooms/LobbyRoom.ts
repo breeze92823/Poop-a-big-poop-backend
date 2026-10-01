@@ -27,6 +27,7 @@ import {
   type BoostDoc,
   type SavedFoodsDoc,
 } from "../db.js";
+import { ShopShelf } from "../shop.js";
 
 // One separate board per stat. The Cliff Board shows money; the others are
 // served too so more boards can be added without a server change.
@@ -169,6 +170,9 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
   // sessionId -> epoch ms of the last accepted `poop`, for the rate limit.
   private lastPoopAt = new Map<string, number>();
 
+  // The Buy Food shelf, shared by everyone in the room (see ../shop.ts).
+  private shelf = new ShopShelf();
+
   messages = {
     // Throttled client-side -- not sent every physics frame.
     move: (client: Client, msg: any) => {
@@ -237,6 +241,14 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         console.warn("[LobbyRoom] saveProgress failed", err);
       }
     },
+    // Buy one unit from the shared shelf. Money is the client's to spend; the
+    // server only decides who got the last unit, then tells everyone the new stock.
+    buyFood: (client: Client, msg: { id?: string }) => {
+      const id = typeof msg?.id === "string" ? msg.id : "";
+      const ok = this.shelf.buy(id);
+      client.send("buyResult", { id, ok });
+      this.broadcast("shop", this.shelf.payload());
+    },
     // Re-states identity after a login/logout that happens AFTER join (a guest
     // who signs in mid-session). Without this a late sign-in would never get
     // a userId and saveProgress would no-op for the whole session.
@@ -256,6 +268,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       void this.refreshLeaderboard();
     }, LEADERBOARD_REFRESH_MS);
     this.clock.setInterval(() => this.flushAllPlaytime(), PLAYTIME_FLUSH_MS);
+    this.shelf.sync();
+    // New foods every RESTOCK_MS, on the epoch-aligned clock.
+    this.clock.setInterval(() => {
+      if (this.shelf.sync()) this.broadcast("shop", this.shelf.payload());
+    }, 1000);
   }
 
   // Adds the seconds elapsed since this session's last mark to its live
@@ -307,6 +324,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.playTimeMark.set(client.sessionId, Date.now());
 
     this.setUserId(client, p, options?.userId ?? "");
+    client.send("shop", this.shelf.payload());
     void this.refreshLeaderboard();
   }
 
