@@ -46,7 +46,7 @@ isn't persisted.
 
 | Message | Payload | Cadence |
 |---|---|---|
-| `move` | `{ x, y, z, yaw, moveBlend, grounded }` (all optional) | throttled |
+| `move` | `{ x, y, z, yaw, moveBlend, grounded, bending }` (all optional) | throttled |
 | `poop` | `{ type, size }`: `type` is a food id or `"plain"` (unknown falls back to `plain`), `size` is clamped 0.4–2.5. Bumps `PlayerState.poopSeq`; others replay the drop. Rate-limited to one per 300 ms | on each poop |
 | `setAvatar` | `{ avatar }` (opaque JSON string, ≤4 KB) | on connect + on change |
 | `stats` | `{ money, totalEarned, totalPoops }` (all optional) | debounced on change |
@@ -80,7 +80,7 @@ seconds connected) is **measured by the server clock** and `$inc`'d to Mongo
 every 30 s and on leave, so `saveProgress` can't forge it.
 
 `LobbyState.players` (keyed by `sessionId`) carries `username`, `x/y/z/yaw`,
-`moveBlend`, `grounded`, `poopSeq/poopType/poopSize`, `avatar`, `money`,
+`moveBlend`, `grounded`, `bending`, `poopSeq/poopType/poopSize`, `avatar`, `money`,
 `totalEarned`, `totalPoops`, `playTime` for every connected player. The poop
 inventory, pantry and boost are private and never synced.
 

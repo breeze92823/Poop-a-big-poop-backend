@@ -12,6 +12,8 @@ export const PlayerState = schema(
     moveBlend: t.number().default(0),
     // Airborne tucks the limbs on the remote walk-cycle.
     grounded: t.boolean().default(true),
+    // Bent over to poop (charging, the timing meter, and the moment after a drop): remotes pose the spine.
+    bending: t.boolean().default(false),
     // Bumped once per poop dropped (see LobbyRoom.ts `poop`). Every client
     // replays the drop locally when this changes, so only a counter plus the
     // last poop's flavour and size are synced, not the poop itself.
