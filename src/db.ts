@@ -45,6 +45,15 @@ export interface PlayerDoc {
   boost?: BoostDoc;
   // "Save Food Effects" stall: foods kept for 24 h (systems/foodFx.js).
   savedFoods?: SavedFoodsDoc;
+  // The first-run tutorial was finished (or skipped); only ever set, never cleared
+  // (client systems/tutorial.js).
+  tutorialDone?: boolean;
+  // Step the first-run tutorial is on (constants.ts TUTORIAL_DONE_STEP = finished). Only ever
+  // raised ($max in LobbyRoom saveProgress). Older docs lack it; see resolveTutorialStep.
+  tutorialStep?: number;
+  // Bought Theft Immunity at the Locked Jar: nobody can steal this player's poop and they can't
+  // steal either. Only ever set, never cleared (client systems/theftImmunity.js).
+  theftImmune?: boolean;
   // Total seconds this account has spent connected, measured by the SERVER
   // clock (LobbyRoom.ts flushPlaytime) -- never client-reported, so it can't
   // be forged via saveProgress. Older docs may lack it.

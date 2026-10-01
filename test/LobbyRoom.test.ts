@@ -9,6 +9,8 @@ import {
   sanitizePoops,
   sanitizeFoods,
   sanitizeBoost,
+  sanitizeSavedFoods,
+  resolveTutorialStep,
   type LobbyRoom,
 } from "../src/rooms/LobbyRoom.js";
 import { __setPlayersForTest, type PlayerDoc } from "../src/db.js";
@@ -27,7 +29,10 @@ function fakePlayersCollection(seed: PlayerDoc[] = []) {
       const existing = docs.get(filter._id);
       if (!existing && !options?.upsert) return;
       const base = existing ?? ({ _id: filter._id, ...(update.$setOnInsert ?? {}) } as PlayerDoc);
-      docs.set(filter._id, { ...base, ...(update.$set ?? {}) } as PlayerDoc);
+      const next = { ...base, ...(update.$set ?? {}) } as any;
+      for (const [k, v] of Object.entries(update.$max ?? {})) next[k] = Math.max((next[k] as number) ?? 0, v as number);
+      for (const k of Object.keys(update.$unset ?? {})) delete next[k];
+      docs.set(filter._id, next as PlayerDoc);
     },
     find(_filter: any) {
       let sortField: string | null = null;
@@ -132,6 +137,86 @@ describe("LobbyRoom", () => {
     assert.strictEqual(s2.totalPoops, 0);
   });
 
+  it("brokers a poop steal between two nearby players", async () => {
+    const room = await colyseus.createRoom<LobbyState>("lobby", {});
+    const thief = await colyseus.connectTo(room);
+    const victim = await colyseus.connectTo(room);
+    const results: any[] = [];
+    thief.onMessage("stealResult", (m: any) => results.push(m));
+    victim.onMessage("stealRequest", () =>
+      victim.send("stealHandover", { poops: [{ type: "plain", value: 40 }, { type: "bogus", value: 5 }] }),
+    );
+    const wait = async (n: number) => {
+      for (let i = 0; i < 40 && results.length < n; i++) await new Promise((r) => setTimeout(r, 25));
+    };
+
+    thief.send("move", { x: 0, y: 0, z: 0 });
+    victim.send("move", { x: 1, y: 0, z: 0 });
+    thief.send("stats", { money: 999 });
+    victim.send("stats", { poopCount: 2 });
+    await room.waitForNextPatch();
+
+    thief.send("steal", { target: victim.sessionId });
+    await wait(1);
+    assert.deepStrictEqual(results[0], { ok: false, reason: "poor" });
+
+    thief.send("stats", { money: 5000 });
+    await room.waitForNextPatch();
+    // The poor attempt set no cooldown, so this one goes through.
+    thief.send("steal", { target: victim.sessionId });
+    await wait(2);
+    assert.strictEqual(results[1].ok, true);
+    assert.deepStrictEqual(results[1].poops, [{ type: "plain", value: 40 }]); // forged type dropped
+    assert.strictEqual(results[1].cost, 1000);
+
+    // Immunity blocks it either way (cooldown is checked after, so wait it out is unnecessary).
+    victim.send("stats", { immune: true });
+    await room.waitForNextPatch();
+    thief.send("steal", { target: victim.sessionId });
+    await wait(3);
+    assert.deepStrictEqual(results[2], { ok: false, reason: "immune" });
+
+    // The victim is now protected (and the thief on cooldown).
+    thief.send("steal", { target: victim.sessionId });
+    await wait(4);
+    assert.strictEqual(results[3].ok, false);
+
+  });
+
+  it("stops the victim robbing the thief back for 5 minutes", async () => {
+    const room = await colyseus.createRoom<LobbyState>("lobby", {});
+    const thief = await colyseus.connectTo(room);
+    const victim = await colyseus.connectTo(room);
+    const done: any[] = [];
+    const back: any[] = [];
+    const blocks: any[] = [];
+    thief.onMessage("stealResult", (m: any) => done.push(m));
+    victim.onMessage("stealResult", (m: any) => back.push(m));
+    victim.onMessage("stealBlock", (m: any) => blocks.push(m));
+    victim.onMessage("stealRequest", () => victim.send("stealHandover", { poops: [{ type: "plain", value: 40 }] }));
+    const until = async (arr: any[]) => {
+      for (let i = 0; i < 40 && !arr.length; i++) await new Promise((r) => setTimeout(r, 25));
+    };
+
+    thief.send("move", { x: 0, y: 0, z: 0 });
+    victim.send("move", { x: 1, y: 0, z: 0 });
+    thief.send("stats", { money: 5000, poopCount: 3 });
+    victim.send("stats", { money: 5000, poopCount: 2 });
+    await room.waitForNextPatch();
+
+    thief.send("steal", { target: victim.sessionId });
+    await until(done);
+    assert.strictEqual(done[0].ok, true);
+    await until(blocks);
+    assert.strictEqual(blocks[0].target, thief.sessionId);
+    assert.strictEqual(blocks[0].ms, 300_000);
+
+    victim.send("steal", { target: thief.sessionId });
+    await until(back);
+    assert.strictEqual(back[0].reason, "revenge");
+    assert.ok(back[0].ms > 299_000 && back[0].ms <= 300_000);
+  });
+
   it("relays poop drops, rate-limited, with allow-listed type and clamped size", async () => {
     const room = await colyseus.createRoom<LobbyState>("lobby", {});
     const client1 = await colyseus.connectTo(room);
@@ -196,6 +281,7 @@ describe("LobbyRoom", () => {
     const room = await colyseus.createRoom<LobbyState>("lobby", {});
     const client1 = await colyseus.connectTo(room, { userId: "u1", username: "Pooper" });
 
+    const expiresAt = Date.now() + 3_600_000;
     const boost = { streak: 3, nextClaimAt: 2_000, streakEnd: 3_000, boostEndsAt: 1_500 };
     client1.send("saveProgress", {
       money: 1234.5,
@@ -212,7 +298,8 @@ describe("LobbyRoom", () => {
         { id: "donut", count: 0 },
       ],
       boost,
-      savedFoods: { slots: [{ id: "donut", count: 1 }], expiresAt: 9_999 },
+      savedFoods: { slots: [{ id: "donut", count: 1 }], expiresAt },
+      tutorialDone: true,
     });
     await sleep(100);
 
@@ -227,6 +314,7 @@ describe("LobbyRoom", () => {
     ]);
     assert.deepStrictEqual(saved.pantry, [{ id: "lettuce", count: 3 }]);
     assert.deepStrictEqual(saved.boost, boost);
+    assert.strictEqual(saved.tutorialDone, true);
 
     const sent = captureSends(room);
     const client2 = await colyseus.connectTo(room, { userId: "u1" });
@@ -237,7 +325,8 @@ describe("LobbyRoom", () => {
     assert.strictEqual(progress.totalEarned, 5000);
     assert.deepStrictEqual(progress.pantry, [{ id: "lettuce", count: 3 }]);
     assert.deepStrictEqual(progress.boost, boost);
-    assert.deepStrictEqual(progress.savedFoods, { slots: [{ id: "donut", count: 1 }], expiresAt: 9_999 });
+    assert.strictEqual(progress.tutorialDone, true);
+    assert.deepStrictEqual(progress.savedFoods, { slots: [{ id: "donut", count: 1 }], expiresAt });
     assert.strictEqual(client2.state.players.get(client2.sessionId).money, 1234.5);
   });
 
@@ -333,6 +422,30 @@ describe("LobbyRoom", () => {
       assert.strictEqual(out.boost, undefined);
       assert.strictEqual(sanitizeProgress({ money: NaN })!.money, undefined);
     });
+
+    it("only ever accepts tutorialDone: true", () => {
+      assert.strictEqual(sanitizeProgress({ tutorialDone: true })!.tutorialDone, true);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: false })!.tutorialDone, undefined);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: "yes" })!.tutorialDone, undefined);
+    });
+
+    it("clamps tutorialStep, and a finished one also sets the done flag", () => {
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 3 })!.tutorialStep, 3);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 99 })!.tutorialStep, 6);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: -4 })!.tutorialStep, 0);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 3 })!.tutorialDone, undefined);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: 6 })!.tutorialDone, true);
+      assert.strictEqual(sanitizeProgress({ tutorialDone: true })!.tutorialStep, 6);
+      assert.strictEqual(sanitizeProgress({ tutorialStep: "x" })!.tutorialStep, undefined);
+    });
+
+    it("resolveTutorialStep falls back to the done flag for older docs", () => {
+      assert.strictEqual(resolveTutorialStep({ tutorialStep: 2 } as PlayerDoc), 2);
+      assert.strictEqual(resolveTutorialStep({ tutorialDone: true } as PlayerDoc), 6);
+      assert.strictEqual(resolveTutorialStep({ totalEarned: 10 } as PlayerDoc), 6);
+      assert.strictEqual(resolveTutorialStep({ tutorialStep: 2, totalEarned: 10 } as PlayerDoc), 2);
+      assert.strictEqual(resolveTutorialStep({} as PlayerDoc), 0);
+    });
   });
 
   describe("sanitizePoops", () => {
@@ -354,6 +467,28 @@ describe("LobbyRoom", () => {
       );
       assert.deepStrictEqual(sanitizeFoods({ lettuce: 1 }), []);
       assert.strictEqual(sanitizeFoods([{ id: "pizza", count: 1e15 }])[0].count, 1_000_000);
+    });
+  });
+
+  describe("sanitizeSavedFoods", () => {
+    const now = 1_000_000;
+    const slots = [{ id: "donut", count: 1 }];
+    it("drops empty or expired saves and caps the expiry at 24 h", () => {
+      assert.strictEqual(sanitizeSavedFoods({ slots, expiresAt: now - 1 }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots: [], expiresAt: now + 5 }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots, expiresAt: 1e15 }, now)!.expiresAt, now + 86_400_000);
+    });
+
+    it("removes the stored save when the client sends an empty one", async () => {
+      const fake = fakePlayersCollection([baseDoc({ _id: "u1", savedFoods: { slots, expiresAt: Date.now() + 1000 } })]);
+      __setPlayersForTest(fake);
+      const room = await colyseus.createRoom<LobbyState>("lobby", {});
+      const c = await colyseus.connectTo(room, { userId: "u1" });
+      c.send("saveProgress", { money: 5, savedFoods: { slots: [], expiresAt: 0 } });
+      await sleep(80);
+      assert.strictEqual(fake.docs.get("u1")!.savedFoods, undefined);
+      assert.strictEqual(fake.docs.get("u1")!.money, 5);
     });
   });
 

@@ -50,7 +50,7 @@ isn't persisted.
 | `poop` | `{ type, size }`: `type` is a food id or `"plain"` (unknown falls back to `plain`), `size` is clamped 0.4–2.5. Bumps `PlayerState.poopSeq`; others replay the drop. Rate-limited to one per 300 ms | on each poop |
 | `setAvatar` | `{ avatar }` (opaque JSON string, ≤4 KB) | on connect + on change |
 | `stats` | `{ money, totalEarned, totalPoops }` (all optional) | debounced on change |
-| `saveProgress` | `{ money, totalEarned, totalPoops, poops, pantry, boost, savedFoods }` (all optional, see below); no-op for a guest | debounced |
+| `saveProgress` | `{ money, totalEarned, totalPoops, poops, pantry, boost, savedFoods, tutorialDone }` (all optional, see below); no-op for a guest | debounced |
 | `identify` | `{ username, userId }` | when sign-in state changes after join |
 
 `saveProgress` shapes, mirroring the client's state:
@@ -59,6 +59,7 @@ isn't persisted.
 - `pantry`: `[{ id, count }]` (`systems/pantry.js` slots). Known food ids only, duplicates summed, zero counts dropped.
 - `boost`: `{ streak, nextClaimAt, streakEnd, boostEndsAt }` (`systems/boost.js`, epoch ms). Ignored unless all four are numbers.
 - `savedFoods`: `{ slots: [{ id, count }], expiresAt }` (`systems/foodFx.js`).
+- `tutorialDone`: `true` once the first-run tutorial is finished or skipped (`systems/tutorial.js`). One-way: anything but `true` is ignored.
 
 Food ids are the client's `FOODS` in `systems/shop.js`; the server allow-list is
 `FOOD_IDS` in `src/constants.ts`. Add a food in both places.
@@ -67,7 +68,7 @@ Food ids are the client's `FOODS` in `systems/shop.js`; the server allow-list is
 
 | Message | Payload | When |
 |---|---|---|
-| `progress` | `{ money, totalEarned, totalPoops, playTime, poops, pantry, boost, savedFoods }` (`boost`/`savedFoods` are `null` if never saved) | after a signed-in join/identify, if a saved doc exists |
+| `progress` | `{ money, totalEarned, totalPoops, playTime, poops, pantry, boost, savedFoods, tutorialDone }` (`boost`/`savedFoods` are `null` if never saved) | after a signed-in join/identify, if a saved doc exists |
 | `noProgress` | `{}` | after a signed-in join/identify with no saved doc (new account) |
 | `leaderboard` | `{ money, totalEarned, totalPoops, playTime }`, each `Row[]` with `Row = { id, name, value }` | every 15 s and on roster changes; live roster merged with all-time Mongo top scorers |
 
@@ -106,7 +107,7 @@ GitHub settings (Settings → Secrets and variables → Actions):
 
 | Name | Type | Value |
 |---|---|---|
-| `BLOXITY_GAME_ID` | **Variable** | Lowercase game ID from the Bloxity "My Games" dashboard (should be `poop-a-big-poop`) |
+| `LEGION_GAME_ID` | **Variable** | Lowercase game ID from the Bloxity "My Games" dashboard (should be `poop-a-big-poop`) |
 | `LEGION_DEPLOY_TOKEN` | **Secret** | Deploy token from the Bloxity dashboard |
 | `GITHUB_TOKEN` | Automatic | Provided by GitHub; used to push to GHCR. Nothing to configure |
 

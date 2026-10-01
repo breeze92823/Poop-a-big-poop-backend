@@ -13,10 +13,18 @@ import {
   FOOD_MAX_KINDS,
   FOOD_MAX_COUNT,
   BOOST_STREAK_MAX,
+  TUTORIAL_DONE_STEP,
   TIME_MAX,
+  SAVED_FOODS_TTL_MS,
   POOP_SIZE_MIN,
   POOP_SIZE_MAX,
   POOP_MIN_INTERVAL_MS,
+  STEAL_COST,
+  STEAL_RANGE,
+  STEAL_TIMEOUT_MS,
+  STEAL_COOLDOWN_MS,
+  STEAL_PROTECT_MS,
+  STEAL_REVENGE_BLOCK_MS,
 } from "../constants.js";
 import {
   getPlayers,
@@ -26,6 +34,7 @@ import {
   type BoostDoc,
   type SavedFoodsDoc,
 } from "../db.js";
+import { ShopShelf, canGrantTutorialFood } from "../shop.js";
 
 // One separate board per stat. The Cliff Board shows money; the others are
 // served too so more boards can be added without a server change.
@@ -117,9 +126,14 @@ export function sanitizeBoost(raw: unknown): BoostDoc | undefined {
   };
 }
 
-export function sanitizeSavedFoods(raw: unknown): SavedFoodsDoc | undefined {
+// Undefined for anything empty or already expired, and the expiry is capped at
+// 24 h from now so a forged timestamp can't keep foods longer.
+export function sanitizeSavedFoods(raw: unknown, now = Date.now()): SavedFoodsDoc | undefined {
   if (!isObject(raw) || !finite(raw.expiresAt)) return undefined;
-  return { slots: sanitizeFoods(raw.slots), expiresAt: clampInt(raw.expiresAt, TIME_MAX) };
+  const expiresAt = Math.min(clampInt(raw.expiresAt, TIME_MAX), now + SAVED_FOODS_TTL_MS);
+  const slots = sanitizeFoods(raw.slots);
+  if (expiresAt <= now || !slots.length) return undefined;
+  return { slots, expiresAt };
 }
 
 // Same client-trusted model as every other message here -- no server-side
@@ -139,7 +153,28 @@ export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (boost) out.boost = boost;
   const savedFoods = sanitizeSavedFoods(raw.savedFoods);
   if (savedFoods) out.savedFoods = savedFoods;
+  // One-way flag: a stale or forged `false` can never un-finish the tutorial.
+  // One-way flag, like tutorialDone.
+  if (raw.theftImmune === true) out.theftImmune = true;
+  if (raw.tutorialDone === true) {
+    out.tutorialDone = true;
+    out.tutorialStep = TUTORIAL_DONE_STEP;
+  }
+  if (finite(raw.tutorialStep)) {
+    const step = clampInt(raw.tutorialStep, TUTORIAL_DONE_STEP);
+    out.tutorialStep = Math.max(step, out.tutorialStep ?? 0);
+    if (step >= TUTORIAL_DONE_STEP) out.tutorialDone = true;
+  }
   return out;
+}
+
+// What loadProgress() sends down as tutorialStep. A doc saved before steps were tracked has
+// only the done flag, and one with earnings predates the tutorial altogether, so it counts
+// as finished. Exported for tests.
+export function resolveTutorialStep(doc: PlayerDoc): number {
+  if (doc.tutorialDone === true) return TUTORIAL_DONE_STEP;
+  if (typeof doc.tutorialStep === "number") return clampInt(doc.tutorialStep, TUTORIAL_DONE_STEP);
+  return (doc.totalEarned ?? 0) > 0 ? TUTORIAL_DONE_STEP : 0;
 }
 
 /**
@@ -162,6 +197,29 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
 
   // sessionId -> epoch ms of the last accepted `poop`, for the rate limit.
   private lastPoopAt = new Map<string, number>();
+
+  // The Buy Food shelf, shared by everyone in the room (see ../shop.ts).
+  private shelf = new ShopShelf();
+
+  // Sessions that already got their free tutorial unit when the shelf was empty.
+  private tutorialGrants = new Set<string>();
+
+  // sessionId -> last known tutorial step of the signed-in account (from its save). A guest has
+  // none and counts as step 0.
+  private tutorialSteps = new Map<string, number>();
+
+  // Steals waiting on the victim's client to hand its poop over, keyed by the VICTIM's sessionId.
+  // The inventory lives on the client, so the server only brokers the transfer.
+  private pendingSteals = new Map<string, { thief: string; timer: { clear(): void } }>();
+  private stealReadyAt = new Map<string, number>();
+  private stealProtectedUntil = new Map<string, number>();
+  // "<robber identity>><target identity>" -> epoch ms until which the robber may not rob that target
+  // (the target robbed them first). Identity is the account id, else the sessionId, so a
+  // signed-in player can't dodge it by reconnecting.
+  private stealBlockedUntil = new Map<string, number>();
+  private stealIdentity(sessionId: string) {
+    return this.userIds.get(sessionId) ?? sessionId;
+  }
 
   messages = {
     // Throttled client-side -- not sent every physics frame.
@@ -197,14 +255,46 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (avatar) p.avatar = avatar;
     },
     // Live stats for the leaderboard, sent debounced on change.
-    stats: (client: Client, msg: { money?: number; totalEarned?: number; totalPoops?: number }) => {
+    stats: (client: Client, msg: { money?: number; totalEarned?: number; totalPoops?: number; poopCount?: number; immune?: boolean }) => {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       if (finite(msg?.money)) p.money = clampNum(msg.money, MONEY_MAX);
       if (finite(msg?.totalEarned)) p.totalEarned = clampNum(msg.totalEarned, MONEY_MAX);
       if (finite(msg?.totalPoops)) p.totalPoops = clampInt(msg.totalPoops, COUNTER_MAX);
+      if (finite(msg?.poopCount)) p.poopCount = clampInt(msg.poopCount, POOP_MAX_STACKS);
+      // One-way: a stale `false` can never drop a bought immunity.
+      if (msg?.immune === true) p.immune = true;
     },
-    // Debounced push of the durable half of the client state. A guest has no
+    // The sender wants to rob a nearby player. Checks reach, cost, cooldowns and that the
+    // victim holds poop, then asks the victim's client to hand its inventory over.
+    steal: (client: Client, msg: { target?: string }) => {
+      const thiefId = client.sessionId;
+      const fail = (reason: string) => client.send("stealResult", { ok: false, reason });
+      const thief = this.state.players.get(thiefId);
+      const targetId = typeof msg?.target === "string" ? msg.target : "";
+      const victim = this.state.players.get(targetId);
+      const victimClient = this.clients.find((c) => c.sessionId === targetId);
+      if (!thief || !victim || !victimClient || targetId === thiefId) return fail("gone");
+      if (thief.immune || victim.immune) return fail("immune");
+      const now = Date.now();
+      if (now < (this.stealReadyAt.get(thiefId) ?? 0)) return fail("cooldown");
+      const blockedFor = (this.stealBlockedUntil.get(`${this.stealIdentity(thiefId)}>${this.stealIdentity(targetId)}`) ?? 0) - now;
+      if (blockedFor > 0) return client.send("stealResult", { ok: false, reason: "revenge", ms: blockedFor });
+      if (this.pendingSteals.has(targetId)) return fail("busy");
+      if (now < (this.stealProtectedUntil.get(targetId) ?? 0)) return fail("protected");
+      if (Math.hypot(thief.x - victim.x, thief.z - victim.z) > STEAL_RANGE) return fail("far");
+      if (thief.money < STEAL_COST) return fail("poor");
+      if (victim.poopCount <= 0) return fail("empty");
+      this.stealReadyAt.set(thiefId, now + STEAL_COOLDOWN_MS);
+      const timer = this.clock.setTimeout(() => this.finishSteal(targetId, null), STEAL_TIMEOUT_MS);
+      this.pendingSteals.set(targetId, { thief: thiefId, timer });
+      victimClient.send("stealRequest", { by: thief.username || "Someone" });
+    },
+    // The victim's client answers a `stealRequest` with the poop it just gave up.
+    stealHandover: (client: Client, msg: { poops?: unknown }) => {
+      if (!this.pendingSteals.has(client.sessionId)) return;
+      this.finishSteal(client.sessionId, sanitizePoops(msg?.poops));
+    },    // Debounced push of the durable half of the client state. A guest has no
     // userId and this no-ops. Upserts, so a first save creates the document.
     saveProgress: async (client: Client, msg: unknown) => {
       const userId = this.userIds.get(client.sessionId);
@@ -213,20 +303,47 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (!players) return; // Mongo unset/unreachable -- degrade silently
       const patch = sanitizeProgress(msg);
       if (!patch) return;
+      const { tutorialStep, ...setPatch } = patch;
+      if (tutorialStep !== undefined) {
+        this.tutorialSteps.set(client.sessionId, Math.max(tutorialStep, this.tutorialSteps.get(client.sessionId) ?? 0));
+      }
       // Display name comes from this connection's own PlayerState, not `msg`.
       const p = this.state.players.get(client.sessionId);
+      // A save that is empty or expired is removed from the document.
+      const clearFoods = isObject(msg) && "savedFoods" in msg && !patch.savedFoods;
       try {
         await players.updateOne(
           { _id: userId },
           {
-            $set: { ...patch, username: p?.username || "Player", updatedAt: new Date() },
+            $set: { ...setPatch, username: p?.username || "Player", updatedAt: new Date() },
+            // Only ever raised, so a stale save can't send a player back a step.
+            ...(tutorialStep !== undefined ? { $max: { tutorialStep } } : {}),
             $setOnInsert: { version: 1 },
+            ...(clearFoods ? { $unset: { savedFoods: "" as const } } : {}),
           },
           { upsert: true },
         );
       } catch (err) {
         console.warn("[LobbyRoom] saveProgress failed", err);
       }
+    },
+    // Buy one unit from the shared shelf. Money is the client's to spend; the
+    // server only decides who got the last unit, then tells everyone the new stock.
+    buyFood: (client: Client, msg: { id?: string; tutorial?: boolean }) => {
+      const id = typeof msg?.id === "string" ? msg.id : "";
+      let ok = this.shelf.buy(id);
+      // The tutorial's buy step must never dead-end on a sold-out shelf: one unit of the
+      // tutorial food per session is granted without touching the shared stock.
+      if (
+        !ok &&
+        msg?.tutorial === true &&
+        canGrantTutorialFood(id, this.tutorialSteps.get(client.sessionId) ?? 0, this.tutorialGrants.has(client.sessionId))
+      ) {
+        this.tutorialGrants.add(client.sessionId);
+        ok = true;
+      }
+      client.send("buyResult", { id, ok });
+      this.broadcast("shop", this.shelf.payload());
     },
     // Re-states identity after a login/logout that happens AFTER join (a guest
     // who signs in mid-session). Without this a late sign-in would never get
@@ -247,6 +364,11 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       void this.refreshLeaderboard();
     }, LEADERBOARD_REFRESH_MS);
     this.clock.setInterval(() => this.flushAllPlaytime(), PLAYTIME_FLUSH_MS);
+    this.shelf.sync();
+    // New foods every RESTOCK_MS, on the epoch-aligned clock.
+    this.clock.setInterval(() => {
+      if (this.shelf.sync()) this.broadcast("shop", this.shelf.payload());
+    }, 1000);
   }
 
   // Adds the seconds elapsed since this session's last mark to its live
@@ -279,13 +401,45 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     for (const sessionId of [...this.playTimeMark.keys()]) this.flushPlaytime(sessionId);
   }
 
+  // Ends a pending steal: `poops` is what the victim handed over, or null when it never
+  // answered. The thief is told either way so its cost can be kept or refunded.
+  private finishSteal(victimId: string, poops: PoopStackDoc[] | null) {
+    const pending = this.pendingSteals.get(victimId);
+    if (!pending) return;
+    pending.timer.clear();
+    this.pendingSteals.delete(victimId);
+    const thiefClient = this.clients.find((c) => c.sessionId === pending.thief);
+    if (!poops?.length) {
+      thiefClient?.send("stealResult", { ok: false, reason: poops ? "empty" : "timeout" });
+      return;
+    }
+    const now = Date.now();
+    this.stealProtectedUntil.set(victimId, now + STEAL_PROTECT_MS);
+    for (const [key, until] of this.stealBlockedUntil) if (until <= now) this.stealBlockedUntil.delete(key);
+    // The victim may not rob the thief back for a while, and is told so.
+    this.stealBlockedUntil.set(`${this.stealIdentity(victimId)}>${this.stealIdentity(pending.thief)}`, now + STEAL_REVENGE_BLOCK_MS);
+    this.clients
+      .find((c) => c.sessionId === victimId)
+      ?.send("stealBlock", { target: pending.thief, ms: STEAL_REVENGE_BLOCK_MS });
+    const victim = this.state.players.get(victimId);
+    if (victim) victim.poopCount = 0;
+    thiefClient?.send("stealResult", { ok: true, poops, from: victim?.username || "Player", cost: STEAL_COST });
+  }
+
   // Drops a session's per-connection bookkeeping after a final playtime flush.
   private forgetSession(sessionId: string) {
+    for (const [victimId, pending] of [...this.pendingSteals]) {
+      if (victimId === sessionId || pending.thief === sessionId) this.finishSteal(victimId, null);
+    }
+    this.stealReadyAt.delete(sessionId);
+    this.stealProtectedUntil.delete(sessionId);
     this.flushPlaytime(sessionId);
     this.playTimeMark.delete(sessionId);
     this.state.players.delete(sessionId);
     this.userIds.delete(sessionId);
     this.lastPoopAt.delete(sessionId);
+    this.tutorialGrants.delete(sessionId);
+    this.tutorialSteps.delete(sessionId);
   }
 
   onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
@@ -298,6 +452,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
     this.playTimeMark.set(client.sessionId, Date.now());
 
     this.setUserId(client, p, options?.userId ?? "");
+    client.send("shop", this.shelf.payload());
     void this.refreshLeaderboard();
   }
 
@@ -351,12 +506,21 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         client.send("noProgress", {});
         return;
       }
+      const savedFoods = sanitizeSavedFoods(doc.savedFoods);
+      if (doc.savedFoods && !savedFoods) {
+        // Expired: remove it from the document.
+        players
+          .updateOne({ _id: userId }, { $unset: { savedFoods: "" } })
+          .catch((err) => console.warn("[LobbyRoom] expired savedFoods cleanup failed", err));
+      }
       p.money = doc.money ?? 0;
       p.totalEarned = doc.totalEarned ?? 0;
       p.totalPoops = doc.totalPoops ?? 0;
       // Saved total (already includes anything flushed while signed in this
       // session) -- guest time before signing in isn't counted.
       p.playTime = doc.playTime ?? 0;
+      if (doc.theftImmune === true) p.immune = true;
+      this.tutorialSteps.set(client.sessionId, resolveTutorialStep(doc));
       client.send("progress", {
         money: p.money,
         totalEarned: p.totalEarned,
@@ -366,7 +530,10 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         pantry: sanitizeFoods(doc.pantry),
         // Absent for an account that never claimed a boost / saved foods.
         boost: sanitizeBoost(doc.boost) ?? null,
-        savedFoods: sanitizeSavedFoods(doc.savedFoods) ?? null,
+        savedFoods: savedFoods ?? null,
+        theftImmune: doc.theftImmune === true,
+        tutorialDone: doc.tutorialDone === true,
+        tutorialStep: resolveTutorialStep(doc),
       });
     } catch (err) {
       console.warn("[LobbyRoom] loadProgress failed", err);
