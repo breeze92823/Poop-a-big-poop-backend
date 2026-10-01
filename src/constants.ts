@@ -68,7 +68,7 @@ export const MIN_CLIENT_VERSION = 2;
 
 // Treasure Chest on/off. While false the chest is hidden in the client (CHEST_ENABLED in its
 // data/world.js) and `openChest` is refused, so stale tabs that still show it can't claim.
-export const CHEST_ENABLED = true;
+export const CHEST_ENABLED = false;
 
 // Treasure Chest (client systems/chest.js): only this many players, ever, can open it, each
 // once. Claims are keyed by account id (guests by session id) and persisted as
