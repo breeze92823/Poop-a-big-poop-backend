@@ -232,6 +232,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (finite(msg?.yaw)) p.yaw = msg.yaw;
       if (finite(msg?.moveBlend)) p.moveBlend = msg.moveBlend;
       if (typeof msg?.grounded === "boolean") p.grounded = msg.grounded;
+      if (typeof msg?.bending === "boolean") p.bending = msg.bending;
     },
     // The player just dropped a poop. Only a counter plus the poop's flavour
     // and size are stored; every client (the sender included, ignoring its own

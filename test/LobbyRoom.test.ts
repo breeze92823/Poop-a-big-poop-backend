@@ -110,12 +110,13 @@ describe("LobbyRoom", () => {
     const client1 = await colyseus.connectTo(room);
     const client2 = await colyseus.connectTo(room);
 
-    client1.send("move", { x: 1, y: 2, z: 3, yaw: 0.5, moveBlend: 0.75, grounded: false });
+    client1.send("move", { x: 1, y: 2, z: 3, yaw: 0.5, moveBlend: 0.75, grounded: false, bending: true });
     await room.waitForNextPatch();
     const p1 = client2.state.players.get(client1.sessionId);
     assert.strictEqual(p1.x, 1);
     assert.strictEqual(p1.moveBlend, 0.75);
     assert.strictEqual(p1.grounded, false);
+    assert.strictEqual(p1.bending, true);
 
     const avatar = JSON.stringify({ e: { headId: "42" }, p: { height: 1.2 } });
     client1.send("setAvatar", { avatar });
