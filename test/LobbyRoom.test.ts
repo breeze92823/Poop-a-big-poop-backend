@@ -9,6 +9,7 @@ import {
   sanitizePoops,
   sanitizeFoods,
   sanitizeBoost,
+  sanitizeSavedFoods,
   type LobbyRoom,
 } from "../src/rooms/LobbyRoom.js";
 import { __setPlayersForTest, type PlayerDoc } from "../src/db.js";
@@ -27,7 +28,9 @@ function fakePlayersCollection(seed: PlayerDoc[] = []) {
       const existing = docs.get(filter._id);
       if (!existing && !options?.upsert) return;
       const base = existing ?? ({ _id: filter._id, ...(update.$setOnInsert ?? {}) } as PlayerDoc);
-      docs.set(filter._id, { ...base, ...(update.$set ?? {}) } as PlayerDoc);
+      const next = { ...base, ...(update.$set ?? {}) } as any;
+      for (const k of Object.keys(update.$unset ?? {})) delete next[k];
+      docs.set(filter._id, next as PlayerDoc);
     },
     find(_filter: any) {
       let sortField: string | null = null;
@@ -196,6 +199,7 @@ describe("LobbyRoom", () => {
     const room = await colyseus.createRoom<LobbyState>("lobby", {});
     const client1 = await colyseus.connectTo(room, { userId: "u1", username: "Pooper" });
 
+    const expiresAt = Date.now() + 3_600_000;
     const boost = { streak: 3, nextClaimAt: 2_000, streakEnd: 3_000, boostEndsAt: 1_500 };
     client1.send("saveProgress", {
       money: 1234.5,
@@ -212,7 +216,7 @@ describe("LobbyRoom", () => {
         { id: "donut", count: 0 },
       ],
       boost,
-      savedFoods: { slots: [{ id: "donut", count: 1 }], expiresAt: 9_999 },
+      savedFoods: { slots: [{ id: "donut", count: 1 }], expiresAt },
     });
     await sleep(100);
 
@@ -237,7 +241,7 @@ describe("LobbyRoom", () => {
     assert.strictEqual(progress.totalEarned, 5000);
     assert.deepStrictEqual(progress.pantry, [{ id: "lettuce", count: 3 }]);
     assert.deepStrictEqual(progress.boost, boost);
-    assert.deepStrictEqual(progress.savedFoods, { slots: [{ id: "donut", count: 1 }], expiresAt: 9_999 });
+    assert.deepStrictEqual(progress.savedFoods, { slots: [{ id: "donut", count: 1 }], expiresAt });
     assert.strictEqual(client2.state.players.get(client2.sessionId).money, 1234.5);
   });
 
@@ -354,6 +358,28 @@ describe("LobbyRoom", () => {
       );
       assert.deepStrictEqual(sanitizeFoods({ lettuce: 1 }), []);
       assert.strictEqual(sanitizeFoods([{ id: "pizza", count: 1e15 }])[0].count, 1_000_000);
+    });
+  });
+
+  describe("sanitizeSavedFoods", () => {
+    const now = 1_000_000;
+    const slots = [{ id: "donut", count: 1 }];
+    it("drops empty or expired saves and caps the expiry at 24 h", () => {
+      assert.strictEqual(sanitizeSavedFoods({ slots, expiresAt: now - 1 }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots: [], expiresAt: now + 5 }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots }, now), undefined);
+      assert.strictEqual(sanitizeSavedFoods({ slots, expiresAt: 1e15 }, now)!.expiresAt, now + 86_400_000);
+    });
+
+    it("removes the stored save when the client sends an empty one", async () => {
+      const fake = fakePlayersCollection([baseDoc({ _id: "u1", savedFoods: { slots, expiresAt: Date.now() + 1000 } })]);
+      __setPlayersForTest(fake);
+      const room = await colyseus.createRoom<LobbyState>("lobby", {});
+      const c = await colyseus.connectTo(room, { userId: "u1" });
+      c.send("saveProgress", { money: 5, savedFoods: { slots: [], expiresAt: 0 } });
+      await sleep(80);
+      assert.strictEqual(fake.docs.get("u1")!.savedFoods, undefined);
+      assert.strictEqual(fake.docs.get("u1")!.money, 5);
     });
   });
 
