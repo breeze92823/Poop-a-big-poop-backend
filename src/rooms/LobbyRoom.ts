@@ -14,6 +14,7 @@ import {
   FOOD_MAX_COUNT,
   BOOST_STREAK_MAX,
   TIME_MAX,
+  SAVED_FOODS_TTL_MS,
   POOP_SIZE_MIN,
   POOP_SIZE_MAX,
   POOP_MIN_INTERVAL_MS,
@@ -117,9 +118,14 @@ export function sanitizeBoost(raw: unknown): BoostDoc | undefined {
   };
 }
 
-export function sanitizeSavedFoods(raw: unknown): SavedFoodsDoc | undefined {
+// Undefined for anything empty or already expired, and the expiry is capped at
+// 24 h from now so a forged timestamp can't keep foods longer.
+export function sanitizeSavedFoods(raw: unknown, now = Date.now()): SavedFoodsDoc | undefined {
   if (!isObject(raw) || !finite(raw.expiresAt)) return undefined;
-  return { slots: sanitizeFoods(raw.slots), expiresAt: clampInt(raw.expiresAt, TIME_MAX) };
+  const expiresAt = Math.min(clampInt(raw.expiresAt, TIME_MAX), now + SAVED_FOODS_TTL_MS);
+  const slots = sanitizeFoods(raw.slots);
+  if (expiresAt <= now || !slots.length) return undefined;
+  return { slots, expiresAt };
 }
 
 // Same client-trusted model as every other message here -- no server-side
@@ -215,12 +221,15 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
       if (!patch) return;
       // Display name comes from this connection's own PlayerState, not `msg`.
       const p = this.state.players.get(client.sessionId);
+      // A save that is empty or expired is removed from the document.
+      const clearFoods = isObject(msg) && "savedFoods" in msg && !patch.savedFoods;
       try {
         await players.updateOne(
           { _id: userId },
           {
             $set: { ...patch, username: p?.username || "Player", updatedAt: new Date() },
             $setOnInsert: { version: 1 },
+            ...(clearFoods ? { $unset: { savedFoods: "" as const } } : {}),
           },
           { upsert: true },
         );
@@ -351,6 +360,13 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         client.send("noProgress", {});
         return;
       }
+      const savedFoods = sanitizeSavedFoods(doc.savedFoods);
+      if (doc.savedFoods && !savedFoods) {
+        // Expired: remove it from the document.
+        players
+          .updateOne({ _id: userId }, { $unset: { savedFoods: "" } })
+          .catch((err) => console.warn("[LobbyRoom] expired savedFoods cleanup failed", err));
+      }
       p.money = doc.money ?? 0;
       p.totalEarned = doc.totalEarned ?? 0;
       p.totalPoops = doc.totalPoops ?? 0;
@@ -366,7 +382,7 @@ export class LobbyRoom extends Room<{ state: LobbyState }> {
         pantry: sanitizeFoods(doc.pantry),
         // Absent for an account that never claimed a boost / saved foods.
         boost: sanitizeBoost(doc.boost) ?? null,
-        savedFoods: sanitizeSavedFoods(doc.savedFoods) ?? null,
+        savedFoods: savedFoods ?? null,
       });
     } catch (err) {
       console.warn("[LobbyRoom] loadProgress failed", err);

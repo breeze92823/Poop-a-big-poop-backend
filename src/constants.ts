@@ -40,6 +40,9 @@ export const BOOST_STREAK_MAX = 100_000;
 // Epoch-ms fields (nextClaimAt, streakEnd, boostEndsAt, saved-food expiry)
 // must be a plausible timestamp; 0 means "never".
 export const TIME_MAX = 8_640_000_000_000_000; // JS Date range
+// Save Food Effects keeps foods for 24 h (client systems/foodFx.js); a save
+// never lives longer than that, and an expired one is removed.
+export const SAVED_FOODS_TTL_MS = 24 * 3600 * 1000;
 
 // Poop-size multiplier bounds; keep in step with the client's poopScale
 // (systems/poop.js: 0.4..2.5).
