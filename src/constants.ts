@@ -58,3 +58,18 @@ export const POOP_SIZE_MAX = 2.5;
 // Minimum gap between two accepted `poop` messages from one connection, so a
 // modified client can't flood every other client with poop drops.
 export const POOP_MIN_INTERVAL_MS = 300;
+
+// Stealing poop from another player (LobbyRoom.ts `steal` / `stealHandover`). The cost is
+// burned, not paid to the victim; keep STEAL_COST in step with the client's data/net.js.
+export const STEAL_COST = 1000;
+// Horizontal reach the server accepts. The client prompt appears much closer (data/net.js
+// STEAL_RANGE); this is looser because both positions are throttled samples.
+export const STEAL_RANGE = 4;
+// How long the victim's client has to hand its poop over before the steal fails.
+export const STEAL_TIMEOUT_MS = 5_000;
+// Per-thief gap between two steal attempts.
+export const STEAL_COOLDOWN_MS = 3_000;
+// After being robbed a player can't be robbed again for this long.
+export const STEAL_PROTECT_MS = 30_000;
+// After A robs B, B can't rob A back for this long (shown to B; keep in step with the client).
+export const STEAL_REVENGE_BLOCK_MS = 5 * 60 * 1000;

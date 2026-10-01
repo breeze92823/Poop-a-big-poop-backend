@@ -30,6 +30,11 @@ export const PlayerState = schema(
     money: t.number().default(0),
     totalEarned: t.number().default(0),
     totalPoops: t.number().default(0),
+    // How many poops this player is holding, so others know whether stealing is worth it.
+    // Only the count is public; the inventory itself stays private.
+    poopCount: t.number().default(0),
+    // Bought Theft Immunity (Locked Jar): can't be robbed and can't rob. One-way per session.
+    immune: t.boolean().default(false),
     // Total seconds connected (saved total for a signed-in player + this
     // session), server-measured -- see LobbyRoom.ts flushPlaytime().
     playTime: t.number().default(0),

@@ -137,6 +137,86 @@ describe("LobbyRoom", () => {
     assert.strictEqual(s2.totalPoops, 0);
   });
 
+  it("brokers a poop steal between two nearby players", async () => {
+    const room = await colyseus.createRoom<LobbyState>("lobby", {});
+    const thief = await colyseus.connectTo(room);
+    const victim = await colyseus.connectTo(room);
+    const results: any[] = [];
+    thief.onMessage("stealResult", (m: any) => results.push(m));
+    victim.onMessage("stealRequest", () =>
+      victim.send("stealHandover", { poops: [{ type: "plain", value: 40 }, { type: "bogus", value: 5 }] }),
+    );
+    const wait = async (n: number) => {
+      for (let i = 0; i < 40 && results.length < n; i++) await new Promise((r) => setTimeout(r, 25));
+    };
+
+    thief.send("move", { x: 0, y: 0, z: 0 });
+    victim.send("move", { x: 1, y: 0, z: 0 });
+    thief.send("stats", { money: 999 });
+    victim.send("stats", { poopCount: 2 });
+    await room.waitForNextPatch();
+
+    thief.send("steal", { target: victim.sessionId });
+    await wait(1);
+    assert.deepStrictEqual(results[0], { ok: false, reason: "poor" });
+
+    thief.send("stats", { money: 5000 });
+    await room.waitForNextPatch();
+    // The poor attempt set no cooldown, so this one goes through.
+    thief.send("steal", { target: victim.sessionId });
+    await wait(2);
+    assert.strictEqual(results[1].ok, true);
+    assert.deepStrictEqual(results[1].poops, [{ type: "plain", value: 40 }]); // forged type dropped
+    assert.strictEqual(results[1].cost, 1000);
+
+    // Immunity blocks it either way (cooldown is checked after, so wait it out is unnecessary).
+    victim.send("stats", { immune: true });
+    await room.waitForNextPatch();
+    thief.send("steal", { target: victim.sessionId });
+    await wait(3);
+    assert.deepStrictEqual(results[2], { ok: false, reason: "immune" });
+
+    // The victim is now protected (and the thief on cooldown).
+    thief.send("steal", { target: victim.sessionId });
+    await wait(4);
+    assert.strictEqual(results[3].ok, false);
+
+  });
+
+  it("stops the victim robbing the thief back for 5 minutes", async () => {
+    const room = await colyseus.createRoom<LobbyState>("lobby", {});
+    const thief = await colyseus.connectTo(room);
+    const victim = await colyseus.connectTo(room);
+    const done: any[] = [];
+    const back: any[] = [];
+    const blocks: any[] = [];
+    thief.onMessage("stealResult", (m: any) => done.push(m));
+    victim.onMessage("stealResult", (m: any) => back.push(m));
+    victim.onMessage("stealBlock", (m: any) => blocks.push(m));
+    victim.onMessage("stealRequest", () => victim.send("stealHandover", { poops: [{ type: "plain", value: 40 }] }));
+    const until = async (arr: any[]) => {
+      for (let i = 0; i < 40 && !arr.length; i++) await new Promise((r) => setTimeout(r, 25));
+    };
+
+    thief.send("move", { x: 0, y: 0, z: 0 });
+    victim.send("move", { x: 1, y: 0, z: 0 });
+    thief.send("stats", { money: 5000, poopCount: 3 });
+    victim.send("stats", { money: 5000, poopCount: 2 });
+    await room.waitForNextPatch();
+
+    thief.send("steal", { target: victim.sessionId });
+    await until(done);
+    assert.strictEqual(done[0].ok, true);
+    await until(blocks);
+    assert.strictEqual(blocks[0].target, thief.sessionId);
+    assert.strictEqual(blocks[0].ms, 300_000);
+
+    victim.send("steal", { target: thief.sessionId });
+    await until(back);
+    assert.strictEqual(back[0].reason, "revenge");
+    assert.ok(back[0].ms > 299_000 && back[0].ms <= 300_000);
+  });
+
   it("relays poop drops, rate-limited, with allow-listed type and clamped size", async () => {
     const room = await colyseus.createRoom<LobbyState>("lobby", {});
     const client1 = await colyseus.connectTo(room);
